@@ -1,0 +1,533 @@
+---
+title: "Predicting Salaries Index With Different Machine Learning Methods"
+output: html_notebook
+---
+
+### Introduction
+
+In this report, we are going to train different machine learning methods and test their performance on our test data. Our data can be downloaded from the link:\textcolor{blue}{<https://data.tuik.gov.tr/Bulten/DownloadIstatistikselTablo?p=T5g/WOiY1BH4Jbmww3jtCo1q031I/Mnzzu7HVIjz75Ozv2NzmhrNTzNzaLCw74Pu>}. Our task is regression and the method we used in this report are: MLR, Random Forest, Decision Tree, k-NN, SVM regression and a stacking ensemble method from the library H20.
+
+**Research Question**
+
+Our research question is:
+
+***"What is the best machine learning method or algorithm that best predicts the salary index based on different factors?"***
+
+**Data & data structure**
+
+Here's a look into the excel file...
+
++:-----------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------+
+| ![Fig.1: Data Excel File](pictures/Screenshot%202024-05-09%20140612.png){width="3.73in"} | The excel file consists of multiple tables stacked on top of each                       |
+|                                                                                          |                                                                                         |
+|                                                                                          | other each representing the features of an economic activity. The features columns are: |
+|                                                                                          |                                                                                         |
+|                                                                                          | -   Employment Index: Unadjusted, Calender adjusted, Seasonal and                       |
+|                                                                                          |                                                                                         |
+|                                                                                          |     calender adjusted                                                                   |
+|                                                                                          |                                                                                         |
+|                                                                                          | -   Hours worked Index: Unadjusted, Calender adjusted, Seasonal and                     |
+|                                                                                          |                                                                                         |
+|                                                                                          |     calender adjusted                                                                   |
+|                                                                                          |                                                                                         |
+|                                                                                          | -   Gross wages-salaries Index: Unadjusted, Calender adjusted,Seasonal and              |
+|                                                                                          |                                                                                         |
+|                                                                                          |     calender adjusted                                                                   |
++------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------+
+
+## Code:
+
+```{=tex}
+\let\oldShaded\Shaded
+\let\endoldShaded\endShaded
+\renewenvironment{Shaded}{\small\oldShaded}{\endoldShaded}
+```
+```{r echo=FALSE,  size = "small"}
+#\tiny
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = TRUE, results = "hold", echo = TRUE, fig.align="center", size = 'small')
+
+```
+
+```{r message=FALSE, warning=FALSE,  size = "small"}
+library(readxl)
+data1 <- read_excel("data/salary index data.xls",  range= "A127:Z726", col_names = FALSE)
+data2 <- read_excel("data/salary index data.xls",  range= "A787:Z1266", col_names = FALSE)
+full_data <- rbind(data1, data2)
+dim(full_data)
+```
+
+```{r warning=FALSE,  size = "small"}
+print(full_data[1:3, 1:13])
+```
+
+### Data Cleaning
+
+**Renaming and dropping unwanted columns**
+
+We are only using the unadjusted version of the columns...
+
+```{r message=FALSE, warning=FALSE,  size = "small"}
+library(dplyr)
+select_and_rename_v2 <- function(df) { # cleaning pipeline
+  selected_df <- df[, c(1, 2, 3, 4, 12, 20)] # Select columns 1, 2, 3, 4, 12, and 20
+  # Rename the columns with desired names
+  names(selected_df) <- c("Economic activity", "Year", "Quarter", "Employment index", "Hours worked index", "salaries index")
+  # Reordering
+  selected_df = selected_df[c("Year", "Quarter", "Employment index", "Hours worked index", "salaries index", "Economic activity")]
+  return(selected_df) }
+clean_full_data = select_and_rename_v2(full_data)
+head(clean_full_data, 3)
+```
+
+**Fixing wrong entries**
+
+Some comment where made by tuik and that caused some entries in the Year column to have letters so we are fixing them so that the column can be of type int...
+
+```{r warning=FALSE,  size = "small"}
+clean_full_data[53,]
+```
+
+```{r warning=FALSE}
+clean_full_data$Year <- gsub("\\(r\\)", "", clean_full_data$Year) # using regular expressions to fix wrong entries
+clean_full_data$Year <- as.numeric(clean_full_data$Year)
+clean_full_data[53,]
+```
+
+**Filling NA's**
+
+seeing what column have NA values..
+
+```{r warning=FALSE,  size = "small"}
+colSums(is.na(clean_full_data))
+```
+
+*Year and Quarter columns: the year column has empty entries that indicate the value of the last non empty and because we stacked all the tables. For those empty entries we will be using a function that replaces the NAs with the last non-NA value. We are making a function pipeline that replaces quarter with a number and merges both columns into one so it becomes our only time series column.*
+
+```{r warning=FALSE,  size = "small"}
+library(dplyr)
+library(zoo)
+one_column_function <- function(df) {
+  quarter_mapping <- c("I" = 1, "II" = 2, "III" = 3, "IV" = 4)
+  df <- df |>
+    mutate(
+      Year = na.locf(df$Year, na.rm = FALSE),
+      Year_Quarter = as.numeric(as.numeric(Year) + (quarter_mapping[Quarter] - 1) / 4
+    )) |>
+    select(-Year, -Quarter)
+  return(df) }
+clean_full_data = one_column_function(clean_full_data)
+head(clean_full_data,3)
+```
+
+*Economic Activity Column: has empty entries for the same reason above but in this case each table from the tables stacked has a different value for that we are making a window and iterating through each window to fill the NA's with the first non-NA value in that window (each table from the stacked tables has 60 rows thus the /60). After that we made the column of type factor...*
+
+```{r warning=FALSE,  size = "small"}
+library(dplyr)
+fill_pattern <- function(df) {
+  n_rows <- nrow(df)
+  num_windows <- ceiling(n_rows / 60)
+  for (i in 1:num_windows) { # Iterate over each window
+    start_index <- (i - 1) * 60 + 1 # Determine the start and end indices of the current window
+    end_index <- min(i * 60, n_rows)
+    df[start_index:end_index, "Economic activity"] <- df[start_index+1, "Economic activity"] # Fill the current window with the second row value
+  }
+  return(df)}
+clean_full_data = fill_pattern(clean_full_data)
+head(clean_full_data,3)
+```
+
+```{r warning=FALSE,  size = "small"}
+clean_full_data$`Economic activity` = factor(clean_full_data$`Economic activity`)
+```
+
+*fixing names: because some names have some special Turkish characters and changing them would mean not running into unexpected errors when training* \tiny
+
+```{r warning=FALSE,  size = "small"}
+library(dplyr)
+library(forcats)
+clean_full_data <- clean_full_data |> # changing name with forcats
+  mutate(`Economic activity` = fct_recode(`Economic activity`, "Intermediate goods" = "IG-Intermediate goods",
+          "Durable consumer goods" = "DCG-Durable consumer goods","Non-durable consumer goods" = "NDCG-Non-durable consumer goods",
+          "Energy" = "NRG-Energy","Capital goods" = "CG-Capital goods",
+          "Mining and quarrying" = "Madencilik ve taş ocakçılığı","Manufacturing" = "İmalat",
+          "Electricity, gas, steam and air conditioning supply" = "Elektrik, gaz, buhar ve iklimlendirme",
+          "Water supply, sewerage, waste management and remediation activities" = "Su temini; kanalizasyon, atık yönetimi",
+          "Construction" = "İnşaat","Wholesale and retail trade" = "Toptan ve perakende ticaret;",
+          "Transportation and storage" = "Ulaştırma ve depolama","Accommodation and food service activities" = "Konaklama ve yiyecek hizmeti",
+          "Information and communication" = "Bilgi ve iletişim","Financial and insurance activities" = "Finans ve sigorta faaliyetleri",
+          "Real estate activities" = "Gayrimenkul faaliyetleri",
+          "Professional, scientific and technical activities" = "Mesleki, bilimsel ve teknik faaliyetler",
+          "Administrative and support service activities" = "İdari ve destek hizmet faaliyetleri"))
+head(levels(clean_full_data$`Economic activity`),3)
+```
+
+**Final structure**
+
+```{r warning=FALSE,  size = "small"}
+str(clean_full_data)
+dim(clean_full_data)
+```
+
+### Visualizations
+
+-   correlation heatmap between all variables
+
+```{r warning=FALSE, fig.height=3, fig.width=6,  size = "small"}
+library(ggplot2)
+library(reshape2)
+data <- cor(clean_full_data[sapply(clean_full_data, is.numeric)]) # Calculating correlation matrix
+data1 <- melt(data) # Reshaping data
+p <- ggplot(data1, aes(Var1, Var2, fill = value)) + 
+  geom_tile() +
+  geom_text(aes(label = round(value, 8)), color = "black", size = 3) +
+  scale_fill_gradient(low = "white", high = "purple") + # Color gradient for heatmap
+  theme_minimal() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), # Rotating x-axis labels for better readability
+        axis.title.x = element_blank(), # Removing axes titles
+        axis.title.y = element_blank())
+print(p)
+```
+
+The correlation between the target and the features is not bad but the biggest maybe problem hear is the feature co-linearity, although that is a bad thing we are not going to drop any feature because we don't have a lot of features to begin with.
+
+-   Visualizing trend over time
+
+```{r warning=FALSE, fig.height=3, fig.width=6,  size = "small"}
+library(tidyr)
+library(ggplot2)
+# Reshaping data into long format, excluding Economic_activity and Year_Quarter columns
+df_long <- gather(clean_full_data, key = "Variable", value = "Value", -Year_Quarter, -`Economic activity`)
+# Ploting line plots for each variable, using Economic_activity as hue
+ggplot(df_long, aes(x = Year_Quarter, y = Value, color = `Economic activity`, group = `Economic activity`)) +
+  geom_line() +
+  facet_wrap(~ Variable, scales = "free_y", nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(color = FALSE)  # Removing the legend
+```
+
+We can see the co-linearity between the previous two features but notice how the trends are a bit different which is information we obtain by keeping the feature and training on the whole data set.
+
+### Data Pre-processing
+
+**Feature Selection**
+
+-   we are gonna use all the features despite two being highly correlated. We will later use other methods to ensure good accuracy...
+
+```{r warning=FALSE,  size = "small"}
+data <- clean_full_data
+```
+
+**Encoding**
+
+encoding is recommended so that the algorithm doesn't have to deal with characters, we are using one-hot encoding because the categorical column is not ordinal but nominal.
+
+```{r warning=FALSE,  size = "small"}
+library(fastDummies)
+data <- dummy_cols(data, select_columns = "Economic activity")
+data <- subset(data, select = -c(`Economic activity`))
+tail(colnames(data),3)
+```
+
+**Renaming "salaries index" to y for easier and shorter code**
+
+```{r warning=FALSE,  size = "small"}
+names(data)[names(data) == "salaries index"] <- "y"
+head(data$y,3)
+```
+
+**Train Test Split**
+
+We will be doing an 80% training, 10% validation, 10% testing ratio for most models thus the code below...
+
+```{r warning=FALSE,  size = "small"}
+library(caret)
+set.seed(45) # Setting the seed for reproducibility
+train_indices <- createDataPartition(data$y, p = 0.9, list = FALSE) # Splitting the dataset into 90% training and 10% test
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+cat("Training data dimensions:", dim(train_data), "\n")
+cat("Test data dimensions:", dim(test_data), "\n")
+```
+
+**Scaling**
+
+because scaling is recommended for most models we are applying it but for any other case we will first save the unscaled version...
+
+```{r warning=FALSE,  size = "small"}
+unscaled_train_data = train_data # Saving unscaled version
+unscaled_test_data = test_data
+library(caret)
+set.seed(45)
+columns_to_normalize <- c("Employment index", "Hours worked index", "y", "Year_Quarter")
+preprocess <- preProcess(train_data[, columns_to_normalize], method = c("center", "scale"))# Pre-processing pipeline to *normalize* the selected columns
+norm_train_data <- predict(preprocess, newdata = train_data)# Applying the pipeline to the training data
+norm_test_data <- predict(preprocess, newdata = test_data)# Applying the same pipeline to the test data
+print(norm_train_data[1:3, 1:4])
+```
+
+**Specifying X & Y**
+
+Assigning X and Y for upcoming testing...
+
+```{r size = "small"}
+library(dplyr)
+# Unscaled train & test, y & x
+unscaled_train_x = select(unscaled_train_data, -y)
+unscaled_train_y = as.numeric(unscaled_train_data[["y"]])
+unscaled_test_x = select(unscaled_test_data, -y)
+unscaled_test_y = as.numeric(unscaled_test_data[["y"]])
+# Scaled train & test, y & x
+train_x = select(norm_train_data, -y)
+train_y = as.numeric(norm_train_data[["y"]])
+test_x = select(norm_test_data, -y)
+test_y = as.numeric(norm_test_data[["y"]])
+```
+
+### Models
+
+**Testing score function**
+
+We are going to use the normalized version of RMSE as the normal RMSE does not take into consideration the error according to the range of our target variable and we would have to analyze the range to determine if the score is good or not. Normalized RMSE takes into consideration our Y range and outputs a decimal between 0-1 and the closer it is to 0 the better the model is. Here's how we implemented it...
+
+```{r size = "small"}
+normalized_rmse = function(pred, real){ #Normalized Root Mean Squared Error
+  error = real - pred
+  sqrt(mean(error^2))/(max(real) - min(real)) }
+```
+
+#### MLR: Multiple Linear Regression
+
+-   **Training and testing...**
+
+```{r size = "small"}
+set.seed(123)
+mlr_model <- lm(y ~ ., data = norm_train_data) # Training...
+mlr_predictions <- predict(mlr_model, newdata = test_x)  # Testing...
+mlr_rmse <- normalized_rmse(mlr_predictions, test_y)
+print(mlr_rmse)
+```
+
+#### Random Forest
+
+-   **Training...**
+
+```{r size = "small"}
+library(caret)
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 5) # Performing cross validation
+rf_model <- train( # Training the Random Forest model
+  y ~ ., 
+  data = norm_train_data, 
+  method = "rf",
+  trControl = train_control,
+  ntree = 500)  # Number of trees in the forest
+print(rf_model) # Printing metrics scores
+```
+
+-   **Testing...**
+
+```{r size = "small"}
+set.seed(123)
+rf_predictions <- predict(rf_model, newdata = norm_test_data)
+rf_rmse = normalized_rmse(rf_predictions, test_y)
+print(rf_rmse)
+```
+
+#### Decision Tree
+
+-   **Training...**
+
+```{r size = "small"}
+library(rpart)
+set.seed(123)
+tree_model <- rpart(
+  formula = y ~ .,
+  data = norm_train_data, 
+  method = "anova", # "anova" to specify regression
+  control = rpart.control(cp = 0.01))  # Control parameters (complexity parameter)
+```
+
+-   **Testing...**
+
+```{r size = "small"}
+set.seed(123)
+dt_predictions <- predict(tree_model, newdata = norm_test_data)
+dt_rmse = normalized_rmse(dt_predictions, test_y) 
+print(dt_rmse)
+```
+
+#### KNN: K-Nearest Neighbor
+
+-   **Training...**
+
+```{r size = "small"}
+library(caret)
+set.seed(123)
+knn_model <- train( # Training the KNN regression model
+  x = train_x,      
+  y = train_y,      
+  method = "knn",    
+  trControl = trainControl(method = "cv", number = 5), # Cross-validation settings
+  tuneGrid = expand.grid(k = c(1, 3, 5)))  # Hyperparameter grid (k)
+```
+
+-   **Testing...**
+
+```{r size = "small"}
+set.seed(123)
+knn_predictions <- predict(knn_model, newdata = test_x)
+knn_rmse = normalized_rmse(knn_predictions, test_y)
+print(knn_rmse)
+```
+
+#### SVM Regression
+
+-   Now we will be trying the regression version of the support vector machines we will be implementing grid search for hyper-parameter tuning...
+
+-   **Training with hyper-parameter tuning...**
+
+```{r warning=FALSE,  size = "small"}
+library(e1071)
+set.seed(45)
+#Tuning the SVM model
+tuned_svm=tune(svm, y~., data=norm_train_data, ranges=list(epsilon=seq(0,1,0.1), cost=c(0.01, 0.1, 1, 10, 100), 
+                                                       kernal = c("linear", "polynomial", "radial basis", "sigmoid")))
+print(tuned_svm) # performance measure = MSE
+```
+
+-   **Training and validation accuracy**
+
+```{r size = "small"}
+best_tuned_svm = tuned_svm$best.model
+svm_train_err = normalized_rmse(predict(best_tuned_svm, train_x), train_y)
+print(svm_train_err)
+```
+
+-   **Testing...**
+
+```{r size = "small"}
+svm_predictions = predict(best_tuned_svm, test_x)
+svm_rmse = normalized_rmse(svm_predictions, test_y)
+print(svm_rmse)
+```
+
+#### ALL IN ONE: Blender
+
+-   In this section we are going to be implementing the ensemble **stacking** method involving three base learners and a meta learner which learns from the predictions of the base learners...
+
+-   *LEARNER-1: Gradient Boosting Machine*
+
+```{r warning=FALSE,message=FALSE, results='hide',  size = "small"}
+library(h2o)
+h2o.init() # Initiating h20 environment
+set.seed(42)
+nfolds <- 10 # Number of CV folds (to generate level-one data for stacking)
+gbm <- h2o.gbm(x = names(train_x), # Gradient Boosting Machine
+               y = "y",
+               training_frame=as.h2o(norm_train_data),
+               nfolds = nfolds,
+               keep_cross_validation_predictions = TRUE,
+               seed = 42)
+```
+
+-   *LEARNER-2: Generalized Linear Model*
+
+```{r message=FALSE, results='hide',  size = "small"}
+set.seed(42)
+glm <- h2o.glm(x = names(train_x), # Generalized Linear Model
+               y = "y",
+               training_frame=as.h2o(norm_train_data),
+               nfolds = nfolds,
+               keep_cross_validation_predictions = TRUE,
+               seed = 42)
+```
+
+-   *LEARNER-3: Fully connected Neural Network*
+
+```{r message=FALSE, results='hide', size = "small"}
+set.seed(42)
+dl<- h2o.deeplearning(x = names(train_x), # Fully Connected Neural Network
+                      y = "y",
+                      training_frame=as.h2o(norm_train_data),
+                      nfolds = nfolds,
+                      keep_cross_validation_predictions = TRUE,
+                      seed = 42)
+```
+
+-   **META LEARNER: Random Forest**
+
+```{r message=FALSE, results='hide',  size = "small"}
+set.seed(42)
+# Train a stacked Random forest ensemble using the previously trained models
+ensemble <- h2o.stackedEnsemble(x = names(train_x),
+                                y = "y",
+                                training_frame=as.h2o(norm_train_data),
+                                metalearner_algorithm="drf",
+                                metalearner_nfolds = 30,
+                                base_models = list(gbm, glm, dl),
+                                metalearner_params = list(ntrees = 100, keep_cross_validation_predictions = TRUE),
+                                seed = 42)
+```
+
+-   **meta learner training metrics...**
+
+```{r size = "small"}
+ensemble@model$training_metrics
+```
+
+-   **meta learner validation rmse curve...**
+
+```{r fig.height=2, fig.width=4,  size = "small"}
+rmse_df = as.data.frame(t(as.data.frame(ensemble@model$cross_validation_metrics_summary)[6,3:32]))
+ggplot(rmse_df, aes(x = index(rmse_df), y = rmse)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "CV", y = "RMSE", title = "RMSE Values across Cross-Validation Folds")
+```
+
+-   **Testing base learners performance...**
+
+```{r size = "small"}
+set.seed(45)
+h20_test = as.h2o(norm_test_data) # data to H2O data
+gbm_perf <- h2o.performance(gbm, newdata = h20_test)
+glm_perf <- h2o.performance(glm, newdata = h20_test)
+dl_perf <- h2o.performance(dl, newdata = h20_test)
+print(gbm_perf)
+print(glm_perf)
+print(dl_perf)
+```
+
+-   **meta learner performance on test data...**
+
+```{r size = "small"}
+set.seed(45)
+meta_perf <- h2o.performance(ensemble, newdata = h20_test)
+print(meta_perf)
+```
+
+### Test Results Summary
+
+-   Now to sum up all the results of our project we are going to make a table with all the models' RMSE scores on the test data and compare them...
+
+```{r size = "small"}
+ens_rmse = meta_perf@metrics$RMSE/(max(test_y) - min(test_y))
+rmse_df = data.frame("Model" = c("Multiple Linear Regression", "Random Forest", "Decision Tree", "K-Nearest Neighbors", "Support Vector Machine Regression", "Stacking (Blender)"),
+                "Normalized RMSE" = c(mlr_rmse, rf_rmse, dt_rmse, knn_rmse, svm_rmse, ens_rmse), check.names=FALSE)
+rmse_df <- rmse_df[order(rmse_df$`Normalized RMSE`, decreasing = TRUE), ]
+print(rmse_df)
+```
+
+| *Model*            | *Normalized RMSE* |
+|--------------------|-------------------|
+| Stacking (Blender) | $0.025 \pm 0.005$ |
+
+: Best Performing Model
+
+## Conclusion
+
+As shown in the results summary, the answer to our research question is...
+
+***"The best out of all the tested machine learning algorithm is the stacking method called Blender more commonly"***
+
+which makes sense as it aligns with the initial assumption of the ensemble method which imply that combining more than one learner produces better predictions.
